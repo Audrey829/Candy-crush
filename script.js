@@ -1,19 +1,43 @@
 const ROWS = 9;
 const COLS = 9;
-const COLORS = ["red", "blue", "green", "yellow", "purple"];
+const DEFAULT_COLORS = ["red", "blue", "green", "yellow", "purple"];
 
-let board = [];
-let selected = null;
-let score = 0;
-let moves = 20;
-let isAnimating = false;
+/**
+ * Core runtime state for the current round.
+ * This file remains the gameplay engine.
+ * Session flow and stage progression are handled by session.js.
+ */
+const GameEngine = {
+    board: [],
+    selected: null,
+    score: 0,
+    movesLeft: 0,
+    isAnimating: false,
+    currentRoundConfig: null,
+    roundStartTime: null,
+    moveCounter: 0,
+    moveDecisionStartTime: null,
+    onRoundComplete: null,
+    telemetry: null,
+    colors: [...DEFAULT_COLORS],
+    roundFinished: false
+};
 
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function getRoundConfigValue(key, fallback) {
+    return GameEngine.currentRoundConfig && key in GameEngine.currentRoundConfig
+        ? GameEngine.currentRoundConfig[key]
+        : fallback;
+}
+
 function randomColor() {
-    return COLORS[Math.floor(Math.random() * COLORS.length)];
+    const pool = GameEngine.colors && GameEngine.colors.length > 0
+        ? GameEngine.colors
+        : DEFAULT_COLORS;
+    return pool[Math.floor(Math.random() * pool.length)];
 }
 
 function createCandy(color = randomColor(), type = "plain") {
@@ -24,14 +48,51 @@ function createCandy(color = randomColor(), type = "plain") {
     };
 }
 
+function cloneBoard(board = GameEngine.board) {
+    return board.map(row =>
+        row.map(cell => {
+            if (!cell) return null;
+            return { ...cell };
+        })
+    );
+}
+
+function serializeBoard(board = GameEngine.board) {
+    return board.map(row =>
+        row.map(cell => {
+            if (!cell) return null;
+            return {
+                color: cell.color,
+                type: cell.type
+            };
+        })
+    );
+}
+
+function resetRoundState(roundConfig = {}) {
+    GameEngine.board = [];
+    GameEngine.selected = null;
+    GameEngine.score = 0;
+    GameEngine.movesLeft = roundConfig.moves ?? 20;
+    GameEngine.isAnimating = false;
+    GameEngine.currentRoundConfig = roundConfig;
+    GameEngine.roundStartTime = Date.now();
+    GameEngine.moveCounter = 0;
+    GameEngine.moveDecisionStartTime = null;
+    GameEngine.onRoundComplete = roundConfig.onRoundComplete || null;
+    GameEngine.telemetry = createTelemetryRound(roundConfig);
+    GameEngine.colors = roundConfig.colors || DEFAULT_COLORS;
+    GameEngine.roundFinished = false;
+}
+
 function initBoard() {
-    board = [];
+    GameEngine.board = [];
     for (let r = 0; r < ROWS; r++) {
         const row = [];
         for (let c = 0; c < COLS; c++) {
             row.push(createCandy());
         }
-        board.push(row);
+        GameEngine.board.push(row);
     }
 
     stabilizeInitialBoard();
@@ -43,7 +104,7 @@ function stabilizeInitialBoard() {
         const affected = collectCellsFromGroups(groups);
         for (const pos of affected) {
             const [row, col] = pos.split("-").map(Number);
-            board[row][col] = null;
+            GameEngine.board[row][col] = null;
         }
         dropCandies();
         refillBoard();
@@ -53,6 +114,8 @@ function stabilizeInitialBoard() {
 
 function renderBoard() {
     const boardElement = document.getElementById("game-board");
+    if (!boardElement) return;
+
     boardElement.innerHTML = "";
 
     for (let r = 0; r < ROWS; r++) {
@@ -62,7 +125,7 @@ function renderBoard() {
             cell.dataset.row = r;
             cell.dataset.col = c;
 
-            const candy = board[r][c];
+            const candy = GameEngine.board[r][c];
 
             if (candy !== null) {
                 const candyEl = document.createElement("div");
@@ -86,7 +149,7 @@ function renderBoard() {
                     candyEl.classList.add("crushing");
                 }
 
-                if (selected && selected.row === r && selected.col === c) {
+                if (GameEngine.selected && GameEngine.selected.row === r && GameEngine.selected.col === c) {
                     candyEl.classList.add("selected");
                 }
 
@@ -100,62 +163,125 @@ function renderBoard() {
 
     const scoreEl = document.getElementById("score");
     const movesEl = document.getElementById("moves");
-    if (scoreEl) scoreEl.textContent = score;
-    if (movesEl) movesEl.textContent = moves;
+    const stageNameEl = document.getElementById("stage-name");
+
+    if (scoreEl) scoreEl.textContent = GameEngine.score;
+    if (movesEl) movesEl.textContent = GameEngine.movesLeft;
+    if (stageNameEl) {
+        stageNameEl.textContent = GameEngine.currentRoundConfig?.label || "Game";
+    }
 }
 
 async function onCellClick(event) {
-    if (moves <= 0 || isAnimating) return;
+    if (GameEngine.movesLeft <= 0 || GameEngine.isAnimating || GameEngine.roundFinished) return;
 
     const row = parseInt(event.currentTarget.dataset.row, 10);
     const col = parseInt(event.currentTarget.dataset.col, 10);
 
-    if (!selected) {
-        selected = { row, col };
+    if (!GameEngine.selected) {
+        GameEngine.selected = { row, col };
+        GameEngine.moveDecisionStartTime = Date.now();
+
+        safeTelemetrySelection({
+            row,
+            col,
+            timestamp: GameEngine.moveDecisionStartTime
+        });
+
         renderBoard();
         return;
     }
 
-    if (selected.row === row && selected.col === col) {
-        selected = null;
+    if (GameEngine.selected.row === row && GameEngine.selected.col === col) {
+        GameEngine.selected = null;
+        GameEngine.moveDecisionStartTime = null;
         renderBoard();
         return;
     }
 
-    if (!isAdjacent(selected.row, selected.col, row, col)) {
-        selected = { row, col };
+    if (!isAdjacent(GameEngine.selected.row, GameEngine.selected.col, row, col)) {
+        GameEngine.selected = { row, col };
+        GameEngine.moveDecisionStartTime = Date.now();
+
+        safeTelemetrySelection({
+            row,
+            col,
+            timestamp: GameEngine.moveDecisionStartTime
+        });
+
         renderBoard();
         return;
     }
 
-    const first = { ...selected };
+    const first = { ...GameEngine.selected };
     const second = { row, col };
+    const decisionEnd = Date.now();
+    const decisionTimeMs = GameEngine.moveDecisionStartTime
+        ? decisionEnd - GameEngine.moveDecisionStartTime
+        : 0;
 
-    const candyA = board[first.row][first.col];
-    const candyB = board[second.row][second.col];
+    const boardBefore = serializeBoard();
+    const candidateMoveCountBefore = countCandidateMoves(GameEngine.board);
+    const scoreBefore = GameEngine.score;
+
+    const candyA = GameEngine.board[first.row][first.col];
+    const candyB = GameEngine.board[second.row][second.col];
+
+    const moveRecord = {
+        stageId: GameEngine.currentRoundConfig?.id || "unknown",
+        moveIndex: GameEngine.moveCounter + 1,
+        timestampStart: GameEngine.moveDecisionStartTime || decisionEnd,
+        timestampEnd: decisionEnd,
+        decisionTimeMs,
+        firstSelectedCell: first,
+        secondSelectedCell: second,
+        swapFrom: first,
+        swapTo: second,
+        adjacentAttempt: true,
+        validMove: false,
+        revertedSwap: false,
+        scoreBefore,
+        scoreAfter: scoreBefore,
+        scoreDelta: 0,
+        clearedCount: 0,
+        cascadeDepth: 0,
+        createdSpecialTypes: [],
+        usedSpecialSwap: false,
+        candidateMoveCountBefore,
+        boardBefore,
+        boardAfter: null,
+        regionFrom: getBoardRegion(first),
+        regionTo: getBoardRegion(second),
+        regionShift: getBoardRegion(first) !== getBoardRegion(second),
+        exploratoryMove: false,
+        hesitationFlag: false,
+        impulsiveFlag: false,
+        lowValueMoveFlag: false
+    };
 
     swapCells(first.row, first.col, second.row, second.col);
     renderBoard();
 
-    // Special direct swap: color bomb + any normal/special color candy
+    // color bomb direct swap
     if (candyA?.type === "colorBomb" || candyB?.type === "colorBomb") {
-        moves--;
-        selected = null;
-        isAnimating = true;
+        GameEngine.movesLeft--;
+        GameEngine.selected = null;
+        GameEngine.isAnimating = true;
 
-        const otherCandy = candyA.type === "colorBomb" ? candyB : candyA;
+        moveRecord.usedSpecialSwap = true;
+        moveRecord.validMove = true;
+
+        const otherCandy = candyA?.type === "colorBomb" ? candyB : candyA;
         const targetColor = otherCandy?.color;
 
         const affected = new Set();
-
-        // both swapped cells are affected too
         affected.add(`${first.row}-${first.col}`);
         affected.add(`${second.row}-${second.col}`);
 
         if (targetColor) {
             for (let r = 0; r < ROWS; r++) {
                 for (let c = 0; c < COLS; c++) {
-                    const candy = board[r][c];
+                    const candy = GameEngine.board[r][c];
                     if (candy && candy.color === targetColor) {
                         affected.add(`${r}-${c}`);
                     }
@@ -163,9 +289,21 @@ async function onCellClick(event) {
             }
         }
 
-        await resolveSpecialSet(affected);
+        const resolutionSummary = await resolveSpecialSet(affected);
 
-        isAnimating = false;
+        GameEngine.isAnimating = false;
+
+        moveRecord.scoreAfter = GameEngine.score;
+        moveRecord.scoreDelta = GameEngine.score - scoreBefore;
+        moveRecord.clearedCount = resolutionSummary.clearedCount;
+        moveRecord.cascadeDepth = resolutionSummary.cascadeDepth;
+        moveRecord.createdSpecialTypes = resolutionSummary.createdSpecialTypes;
+        moveRecord.boardAfter = serializeBoard();
+        finalizeMoveTelemetry(moveRecord);
+
+        GameEngine.moveCounter++;
+        GameEngine.moveDecisionStartTime = null;
+
         renderBoard();
         checkGameOver();
         return;
@@ -176,20 +314,75 @@ async function onCellClick(event) {
     if (initialGroups.length === 0) {
         await delay(120);
         swapCells(first.row, first.col, second.row, second.col);
-        selected = null;
+        GameEngine.selected = null;
+
+        moveRecord.validMove = false;
+        moveRecord.revertedSwap = true;
+        moveRecord.boardAfter = serializeBoard();
+        finalizeMoveTelemetry(moveRecord);
+
+        GameEngine.moveCounter++;
+        GameEngine.moveDecisionStartTime = null;
+
         renderBoard();
         return;
     }
 
-    moves--;
-    selected = null;
-    isAnimating = true;
+    GameEngine.movesLeft--;
+    GameEngine.selected = null;
+    GameEngine.isAnimating = true;
 
-    await resolveBoard(initialGroups, first, second);
+    moveRecord.validMove = true;
 
-    isAnimating = false;
+    const resolutionSummary = await resolveBoard(initialGroups, first, second);
+
+    GameEngine.isAnimating = false;
+
+    moveRecord.scoreAfter = GameEngine.score;
+    moveRecord.scoreDelta = GameEngine.score - scoreBefore;
+    moveRecord.clearedCount = resolutionSummary.clearedCount;
+    moveRecord.cascadeDepth = resolutionSummary.cascadeDepth;
+    moveRecord.createdSpecialTypes = resolutionSummary.createdSpecialTypes;
+    moveRecord.boardAfter = serializeBoard();
+    finalizeMoveTelemetry(moveRecord);
+
+    GameEngine.moveCounter++;
+    GameEngine.moveDecisionStartTime = null;
+
     renderBoard();
     checkGameOver();
+}
+
+function finalizeMoveTelemetry(moveRecord) {
+    const thresholds = getHeuristicThresholds();
+
+    moveRecord.hesitationFlag =
+        moveRecord.decisionTimeMs >= (thresholds.slowDecisionMs || 4000);
+
+    moveRecord.impulsiveFlag =
+        moveRecord.decisionTimeMs <= (thresholds.fastDecisionMs || 1800) &&
+        (!moveRecord.validMove || moveRecord.scoreDelta <= 30);
+
+    moveRecord.lowValueMoveFlag =
+        moveRecord.validMove &&
+        moveRecord.scoreDelta <= 30 &&
+        moveRecord.clearedCount <= 3 &&
+        moveRecord.cascadeDepth <= 1 &&
+        (!moveRecord.createdSpecialTypes || moveRecord.createdSpecialTypes.length === 0);
+
+    moveRecord.exploratoryMove = inferExploratoryMove(moveRecord);
+
+    safeTelemetryMove(moveRecord);
+}
+
+function inferExploratoryMove(moveRecord) {
+    const existingMoves = GameEngine.telemetry?.moves || [];
+    if (existingMoves.length === 0) return false;
+
+    const prev = existingMoves[existingMoves.length - 1];
+    if (!prev) return false;
+
+    return prev.regionTo !== moveRecord.regionTo;
 }
 
 function isAdjacent(r1, c1, r2, c2) {
@@ -197,9 +390,9 @@ function isAdjacent(r1, c1, r2, c2) {
 }
 
 function swapCells(r1, c1, r2, c2) {
-    const temp = board[r1][c1];
-    board[r1][c1] = board[r2][c2];
-    board[r2][c2] = temp;
+    const temp = GameEngine.board[r1][c1];
+    GameEngine.board[r1][c1] = GameEngine.board[r2][c2];
+    GameEngine.board[r2][c2] = temp;
 }
 
 function sameColor(c1, c2) {
@@ -215,17 +408,17 @@ function sameColor(c1, c2) {
 function findMatchGroups() {
     const groups = [];
 
-    // Horizontal groups
+    // Horizontal
     for (let r = 0; r < ROWS; r++) {
         let start = 0;
 
         for (let c = 1; c <= COLS; c++) {
-            if (c < COLS && sameColor(board[r][c], board[r][c - 1])) {
+            if (c < COLS && sameColor(GameEngine.board[r][c], GameEngine.board[r][c - 1])) {
                 continue;
             }
 
             const len = c - start;
-            if (board[r][start] && board[r][start].type !== "colorBomb" && len >= 3) {
+            if (GameEngine.board[r][start] && GameEngine.board[r][start].type !== "colorBomb" && len >= 3) {
                 const cells = [];
                 for (let k = start; k < c; k++) {
                     cells.push({ row: r, col: k });
@@ -233,7 +426,7 @@ function findMatchGroups() {
                 groups.push({
                     orientation: "horizontal",
                     cells,
-                    color: board[r][start].color
+                    color: GameEngine.board[r][start].color
                 });
             }
 
@@ -241,17 +434,17 @@ function findMatchGroups() {
         }
     }
 
-    // Vertical groups
+    // Vertical
     for (let c = 0; c < COLS; c++) {
         let start = 0;
 
         for (let r = 1; r <= ROWS; r++) {
-            if (r < ROWS && sameColor(board[r][c], board[r - 1][c])) {
+            if (r < ROWS && sameColor(GameEngine.board[r][c], GameEngine.board[r - 1][c])) {
                 continue;
             }
 
             const len = r - start;
-            if (board[start][c] && board[start][c].type !== "colorBomb" && len >= 3) {
+            if (GameEngine.board[start][c] && GameEngine.board[start][c].type !== "colorBomb" && len >= 3) {
                 const cells = [];
                 for (let k = start; k < r; k++) {
                     cells.push({ row: k, col: c });
@@ -259,7 +452,7 @@ function findMatchGroups() {
                 groups.push({
                     orientation: "vertical",
                     cells,
-                    color: board[start][c].color
+                    color: GameEngine.board[start][c].color
                 });
             }
 
@@ -315,7 +508,7 @@ function addWrappedEffect(row, col, affected) {
 function addColorBombEffect(color, affected) {
     for (let r = 0; r < ROWS; r++) {
         for (let c = 0; c < COLS; c++) {
-            const candy = board[r][c];
+            const candy = GameEngine.board[r][c];
             if (candy && candy.color === color) {
                 affected.add(`${r}-${c}`);
             }
@@ -334,7 +527,7 @@ function expandSpecialEffects(affected) {
             if (processed.has(pos)) continue;
 
             const [row, col] = pos.split("-").map(Number);
-            const candy = board[row][col];
+            const candy = GameEngine.board[row][col];
             if (!candy) continue;
 
             const before = affected.size;
@@ -373,7 +566,7 @@ function findWrappedCandidates(groups) {
                             wrapped.push({
                                 row: hc.row,
                                 col: hc.col,
-                                color: board[hc.row][hc.col].color
+                                color: GameEngine.board[hc.row][hc.col].color
                             });
                         }
                     }
@@ -394,6 +587,10 @@ function uniqueSpecials(list) {
 }
 
 async function resolveSpecialSet(affected) {
+    let totalClearedCount = 0;
+    let cascadeDepth = 0;
+    let createdSpecialTypes = [];
+
     expandSpecialEffects(affected);
 
     const matchList = Array.from(affected).map(pos => {
@@ -402,18 +599,20 @@ async function resolveSpecialSet(affected) {
     });
 
     for (const cell of matchList) {
-        if (board[cell.row][cell.col]) {
-            board[cell.row][cell.col].marked = true;
+        if (GameEngine.board[cell.row][cell.col]) {
+            GameEngine.board[cell.row][cell.col].marked = true;
         }
     }
 
     renderBoard();
     await delay(260);
 
-    score += matchList.length * 10;
+    GameEngine.score += matchList.length * 10;
+    totalClearedCount += matchList.length;
+    cascadeDepth = 1;
 
     for (const cell of matchList) {
-        board[cell.row][cell.col] = null;
+        GameEngine.board[cell.row][cell.col] = null;
     }
 
     renderBoard();
@@ -429,18 +628,31 @@ async function resolveSpecialSet(affected) {
 
     let groups = findMatchGroups();
     if (groups.length > 0) {
-        await resolveBoard(groups, { row: -1, col: -1 }, { row: -1, col: -1 });
+        const nested = await resolveBoard(groups, { row: -1, col: -1 }, { row: -1, col: -1 });
+        totalClearedCount += nested.clearedCount;
+        cascadeDepth += nested.cascadeDepth;
+        createdSpecialTypes = createdSpecialTypes.concat(nested.createdSpecialTypes || []);
     }
+
+    return {
+        clearedCount: totalClearedCount,
+        cascadeDepth,
+        createdSpecialTypes
+    };
 }
 
 async function resolveBoard(initialGroups, swapA, swapB) {
     let groups = initialGroups;
+    let totalClearedCount = 0;
+    let cascadeDepth = 0;
+    let createdSpecialTypes = [];
 
     while (groups.length > 0) {
+        cascadeDepth++;
         const affected = collectCellsFromGroups(groups);
         let specialCreations = [];
 
-        // 1) 5 straight -> color bomb
+        // 5 straight -> color bomb
         for (const group of groups) {
             if (group.cells.length >= 5) {
                 const anchor = chooseSpecialAnchor(group, swapA, swapB);
@@ -457,12 +669,11 @@ async function resolveBoard(initialGroups, swapA, swapB) {
             }
         }
 
-        // 2) L / T intersection -> wrapped
+        // L/T -> wrapped
         const wrappedCandidates = findWrappedCandidates(groups);
         for (const w of wrappedCandidates) {
             const key = `${w.row}-${w.col}`;
 
-            // if same cell already reserved for color bomb, skip wrapped
             const alreadyReserved = specialCreations.some(s => s.row === w.row && s.col === w.col);
             if (!alreadyReserved) {
                 specialCreations.push({
@@ -475,7 +686,7 @@ async function resolveBoard(initialGroups, swapA, swapB) {
             }
         }
 
-        // 3) 4 straight -> striped
+        // 4 straight -> striped
         for (const group of groups) {
             if (group.cells.length === 4) {
                 const anchor = chooseSpecialAnchor(group, swapA, swapB);
@@ -496,8 +707,8 @@ async function resolveBoard(initialGroups, swapA, swapB) {
         }
 
         specialCreations = uniqueSpecials(specialCreations);
+        createdSpecialTypes.push(...specialCreations.map(s => s.type));
 
-        // Existing specials caught in blast should trigger
         expandSpecialEffects(affected);
 
         const matchList = Array.from(affected).map(pos => {
@@ -505,26 +716,24 @@ async function resolveBoard(initialGroups, swapA, swapB) {
             return { row, col };
         });
 
-        // Phase 1: mark animation
         for (const cell of matchList) {
-            if (board[cell.row][cell.col]) {
-                board[cell.row][cell.col].marked = true;
+            if (GameEngine.board[cell.row][cell.col]) {
+                GameEngine.board[cell.row][cell.col].marked = true;
             }
         }
 
         renderBoard();
         await delay(260);
 
-        // Phase 2: remove
-        score += matchList.length * 10;
+        GameEngine.score += matchList.length * 10;
+        totalClearedCount += matchList.length;
 
         for (const cell of matchList) {
-            board[cell.row][cell.col] = null;
+            GameEngine.board[cell.row][cell.col] = null;
         }
 
-        // Recreate newly generated specials
         for (const s of specialCreations) {
-            board[s.row][s.col] = {
+            GameEngine.board[s.row][s.col] = {
                 color: s.color,
                 type: s.type,
                 marked: false
@@ -534,12 +743,10 @@ async function resolveBoard(initialGroups, swapA, swapB) {
         renderBoard();
         await delay(140);
 
-        // Phase 3: drop
         dropCandies();
         renderBoard();
         await delay(220);
 
-        // Phase 4: refill
         refillBoard();
         renderBoard();
         await delay(200);
@@ -548,6 +755,12 @@ async function resolveBoard(initialGroups, swapA, swapB) {
         swapA = { row: -1, col: -1 };
         swapB = { row: -1, col: -1 };
     }
+
+    return {
+        clearedCount: totalClearedCount,
+        cascadeDepth,
+        createdSpecialTypes
+    };
 }
 
 function dropCandies() {
@@ -555,17 +768,17 @@ function dropCandies() {
         let writeRow = ROWS - 1;
 
         for (let r = ROWS - 1; r >= 0; r--) {
-            if (board[r][c] !== null) {
-                board[writeRow][c] = board[r][c];
+            if (GameEngine.board[r][c] !== null) {
+                GameEngine.board[writeRow][c] = GameEngine.board[r][c];
                 if (writeRow !== r) {
-                    board[r][c] = null;
+                    GameEngine.board[r][c] = null;
                 }
                 writeRow--;
             }
         }
 
         while (writeRow >= 0) {
-            board[writeRow][c] = null;
+            GameEngine.board[writeRow][c] = null;
             writeRow--;
         }
     }
@@ -574,22 +787,196 @@ function dropCandies() {
 function refillBoard() {
     for (let r = 0; r < ROWS; r++) {
         for (let c = 0; c < COLS; c++) {
-            if (board[r][c] === null) {
-                board[r][c] = createCandy();
+            if (GameEngine.board[r][c] === null) {
+                GameEngine.board[r][c] = createCandy();
             } else {
-                board[r][c].marked = false;
+                GameEngine.board[r][c].marked = false;
             }
         }
     }
 }
 
 function checkGameOver() {
-    if (moves <= 0) {
-        setTimeout(() => {
-            alert(`Game Over! Your score: ${score}`);
-        }, 100);
+    if (GameEngine.movesLeft <= 0 && !GameEngine.roundFinished) {
+        GameEngine.roundFinished = true;
+
+        const result = {
+            roundId: GameEngine.currentRoundConfig?.id || "unknown",
+            label: GameEngine.currentRoundConfig?.label || "Round",
+            score: GameEngine.score,
+            movesPlanned: GameEngine.currentRoundConfig?.moves ?? 0,
+            movesUsed: GameEngine.moveCounter,
+            measured: !!GameEngine.currentRoundConfig?.measured,
+            telemetry: finalizeTelemetryRound(GameEngine.telemetry, {
+                score: GameEngine.score,
+                movesUsed: GameEngine.moveCounter,
+                durationMs: Date.now() - GameEngine.roundStartTime
+            }),
+            boardSnapshot: serializeBoard()
+        };
+
+        if (typeof GameEngine.onRoundComplete === "function") {
+            setTimeout(() => {
+                GameEngine.onRoundComplete(result);
+            }, 180);
+        }
     }
 }
 
-initBoard();
-renderBoard();
+function getGameState() {
+    return {
+        score: GameEngine.score,
+        movesLeft: GameEngine.movesLeft,
+        moveCounter: GameEngine.moveCounter,
+        selected: GameEngine.selected,
+        roundConfig: GameEngine.currentRoundConfig,
+        board: serializeBoard()
+    };
+}
+
+function startRound(roundConfig = {}) {
+    resetRoundState(roundConfig);
+    initBoard();
+    renderBoard();
+}
+
+function setRoundCompleteCallback(callback) {
+    GameEngine.onRoundComplete = callback;
+}
+
+function clearBoardUI() {
+    const boardElement = document.getElementById("game-board");
+    if (boardElement) {
+        boardElement.innerHTML = "";
+    }
+}
+
+/* ---------- telemetry-safe helpers ---------- */
+
+function createTelemetryRound(roundConfig) {
+    if (typeof window.createRoundTelemetry === "function") {
+        return window.createRoundTelemetry(roundConfig);
+    }
+    return {
+        meta: roundConfig,
+        moves: [],
+        selections: [],
+        summary: {}
+    };
+}
+
+function safeTelemetrySelection(selection) {
+    if (typeof window.markTelemetrySelection === "function") {
+        window.markTelemetrySelection(GameEngine.telemetry, selection);
+    } else {
+        GameEngine.telemetry?.selections?.push(selection);
+    }
+}
+
+function safeTelemetryMove(moveRecord) {
+    if (typeof window.recordTelemetryMove === "function") {
+        window.recordTelemetryMove(GameEngine.telemetry, moveRecord);
+    } else {
+        GameEngine.telemetry?.moves?.push(moveRecord);
+    }
+}
+
+function finalizeTelemetryRound(telemetry, summary) {
+    if (typeof window.finalizeRoundTelemetry === "function") {
+        return window.finalizeRoundTelemetry(telemetry, summary);
+    }
+    return {
+        ...telemetry,
+        summary
+    };
+}
+
+/* ---------- helper approximations ---------- */
+
+function getHeuristicThresholds() {
+    if (window.HEURISTIC_THRESHOLDS) return window.HEURISTIC_THRESHOLDS;
+
+    return {
+        fastDecisionMs: 1800,
+        slowDecisionMs: 4000
+    };
+}
+
+function getBoardRegion(cell) {
+    const rowBand = cell.row < 3 ? "top" : cell.row < 6 ? "middle" : "bottom";
+    const colBand = cell.col < 3 ? "left" : cell.col < 6 ? "center" : "right";
+    return `${rowBand}-${colBand}`;
+}
+
+function countCandidateMoves(board) {
+    let count = 0;
+
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            const neighbors = [
+                [r + 1, c],
+                [r, c + 1]
+            ];
+
+            for (const [nr, nc] of neighbors) {
+                if (nr >= ROWS || nc >= COLS) continue;
+
+                swapBoardCells(board, r, c, nr, nc);
+                const valid = hasAnyMatch(board);
+                swapBoardCells(board, r, c, nr, nc);
+
+                if (valid) count++;
+            }
+        }
+    }
+
+    return count;
+}
+
+function swapBoardCells(board, r1, c1, r2, c2) {
+    const temp = board[r1][c1];
+    board[r1][c1] = board[r2][c2];
+    board[r2][c2] = temp;
+}
+
+function hasAnyMatch(board) {
+    // horizontal
+    for (let r = 0; r < ROWS; r++) {
+        let streak = 1;
+        for (let c = 1; c < COLS; c++) {
+            if (
+                board[r][c] &&
+                board[r][c - 1] &&
+                board[r][c].type !== "colorBomb" &&
+                board[r][c - 1].type !== "colorBomb" &&
+                board[r][c].color === board[r][c - 1].color
+            ) {
+                streak++;
+                if (streak >= 3) return true;
+            } else {
+                streak = 1;
+            }
+        }
+    }
+
+    // vertical
+    for (let c = 0; c < COLS; c++) {
+        let streak = 1;
+        for (let r = 1; r < ROWS; r++) {
+            if (
+                board[r][c] &&
+                board[r - 1][c] &&
+                board[r][c].type !== "colorBomb" &&
+                board[r - 1][c].type !== "colorBomb" &&
+                board[r][c].color === board[r - 1][c].color
+            ) {
+                streak++;
+                if (streak >= 3) return true;
+            } else {
+                streak = 1;
+            }
+        }
+    }
+
+    return false;
+}

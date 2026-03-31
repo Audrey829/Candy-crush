@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Candy Crush Mini</title>
     <link rel="stylesheet" href="style.css">
 </head>
@@ -9,14 +10,91 @@
     <div id="game-container">
         <h1>Candy Crush Mini</h1>
 
+        <!-- Stage / round status -->
+        <div id="stage-header">
+            <span class="stage-badge" id="stage-badge">Tutorial</span>
+            <p id="stage-description">
+                Learn the basics, then move through practice, baseline, and difficulty rounds.
+            </p>
+        </div>
+
+        <!-- Top info panel -->
         <div id="info-panel">
             <p>Score: <span id="score">0</span></p>
             <p>Moves: <span id="moves">20</span></p>
+            <p>Stage: <span id="stage-name">Tutorial</span></p>
         </div>
 
-        <div id="game-board"></div>
+        <!-- Board area -->
+        <div id="board-wrapper">
+            <div id="game-board"></div>
+        </div>
+
+        <!-- Overlay for tutorial / transitions / instructions -->
+        <div id="overlay" class="overlay">
+            <div class="overlay-card">
+                <h2 id="overlay-title">Welcome</h2>
+                <p id="overlay-text">
+                    This game will first guide you through a short tutorial, then a practice round,
+                    then measured rounds for a behavioral snapshot in this game context.
+                </p>
+                <div id="overlay-extra" class="overlay-extra"></div>
+                <button id="overlay-button" class="primary-btn">Start</button>
+            </div>
+        </div>
+
+        <!-- Final result panel -->
+        <div id="results-panel" class="hidden">
+            <div class="results-header">
+                <h2>Behavioral Snapshot</h2>
+                <p id="results-subtitle">
+                    A contextual summary of your decision-making style in this game.
+                </p>
+            </div>
+
+            <div class="summary-box">
+                <h3>Main Type</h3>
+                <p id="main-type">-</p>
+                <p id="main-summary">-</p>
+            </div>
+
+            <div class="tags-section">
+                <h3>Secondary Tags</h3>
+                <div id="secondary-tags" class="tag-list"></div>
+            </div>
+
+            <div class="results-section">
+                <h3>Core Metrics</h3>
+                <div id="metrics-grid" class="metric-grid"></div>
+            </div>
+
+            <div class="results-section">
+                <h3>Pressure Response</h3>
+                <div id="pressure-summary" class="summary-box compact">
+                    <p>-</p>
+                </div>
+            </div>
+
+            <div class="results-section">
+                <h3>Session Summary</h3>
+                <div id="session-summary" class="summary-box compact">
+                    <p>-</p>
+                </div>
+            </div>
+
+            <div class="results-actions">
+                <button id="restart-button" class="primary-btn">Play Again</button>
+            </div>
+        </div>
     </div>
 
+    <!-- Load order matters -->
+    <script src="config.js"></script>
+    <script src="storage.js"></script>
+    <script src="telemetry.js"></script>
+    <script src="analysis.js"></script>
+    <script src="ui.js"></script>
     <script src="script.js"></script>
+    <script src="session.js"></script>
 </body>
 </html>
